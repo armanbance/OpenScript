@@ -57,16 +57,22 @@ export default function ChatGPTAgent() {
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [chatSessions, setChatSessions] = useState<ChatSession[]>([])
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
-  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
-  const [editingTitle, setEditingTitle] = useState('')
   const [isClient, setIsClient] = useState(false)
   const [currentPlaceholder, setCurrentPlaceholder] = useState(0)
   const [showTooltip, setShowTooltip] = useState(false)
   const [errors, setErrors] = useState<string[]>([])
   const [showErrors, setShowErrors] = useState(false)
+  const [streamingProgress, setStreamingProgress] = useState<{
+    isStreaming: boolean
+    currentStep: string
+    progress: number
+    stepMessages: string[]
+  }>({
+    isStreaming: false,
+    currentStep: '',
+    progress: 0,
+    stepMessages: []
+  })
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -83,13 +89,6 @@ export default function ChatGPTAgent() {
   useEffect(() => {
     setIsClient(true)
   }, [])
-
-  // Load chat sessions from localStorage on mount (client-side only)
-  useEffect(() => {
-    if (isClient) {
-      loadChatSessions()
-    }
-  }, [isClient])
 
   // Rotate placeholder text
   useEffect(() => {
@@ -109,123 +108,6 @@ export default function ChatGPTAgent() {
     }
   }, [inputMessage])
 
-  // Save to localStorage whenever sessions change (client-side only)
-  useEffect(() => {
-    if (isClient && chatSessions.length > 0) {
-      localStorage.setItem('openscript-chat-sessions', JSON.stringify(chatSessions))
-    }
-  }, [chatSessions, isClient])
-
-  const loadChatSessions = () => {
-    try {
-      const saved = localStorage.getItem('openscript-chat-sessions')
-      if (saved) {
-        const sessions = JSON.parse(saved).map((session: any) => ({
-          ...session,
-          createdAt: new Date(session.createdAt),
-          updatedAt: new Date(session.updatedAt),
-          messages: session.messages.map((msg: any) => ({
-            ...msg,
-            timestamp: new Date(msg.timestamp)
-          }))
-        }))
-        setChatSessions(sessions)
-        
-        // Load the most recent session
-        if (sessions.length > 0) {
-          const mostRecent = sessions.sort((a: ChatSession, b: ChatSession) => 
-            b.updatedAt.getTime() - a.updatedAt.getTime()
-          )[0]
-          setCurrentSessionId(mostRecent.id)
-          setMessages(mostRecent.messages)
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load chat sessions:', error)
-    }
-  }
-
-  const createNewChat = () => {
-    const newSession: ChatSession = {
-      id: `session_${Date.now()}`,
-      title: 'New Chat',
-      messages: [],
-      createdAt: new Date(),
-      updatedAt: new Date()
-    }
-    
-    setChatSessions(prev => [newSession, ...prev])
-    setCurrentSessionId(newSession.id)
-    setMessages([])
-  }
-
-  const switchToSession = (sessionId: string) => {
-    const session = chatSessions.find(s => s.id === sessionId)
-    if (session) {
-      setCurrentSessionId(sessionId)
-      setMessages(session.messages)
-    }
-  }
-
-  const updateCurrentSession = (newMessages: AgentMessage[]) => {
-    if (!currentSessionId) return
-
-    setChatSessions(prev => prev.map(session => {
-      if (session.id === currentSessionId) {
-        // Auto-generate title from first user message if still "New Chat"
-        let title = session.title
-        if (title === 'New Chat' && newMessages.length > 0) {
-          const firstUserMessage = newMessages.find(m => m.role === 'user')
-          if (firstUserMessage) {
-            title = firstUserMessage.content.slice(0, 50) + (firstUserMessage.content.length > 50 ? '...' : '')
-          }
-        }
-        
-        return {
-          ...session,
-          title,
-          messages: newMessages,
-          updatedAt: new Date()
-        }
-      }
-      return session
-    }))
-  }
-
-  const deleteSession = (sessionId: string) => {
-    setChatSessions(prev => prev.filter(s => s.id !== sessionId))
-    
-    if (currentSessionId === sessionId) {
-      const remaining = chatSessions.filter(s => s.id !== sessionId)
-      if (remaining.length > 0) {
-        const mostRecent = remaining.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]
-        setCurrentSessionId(mostRecent.id)
-        setMessages(mostRecent.messages)
-      } else {
-        setCurrentSessionId(null)
-        setMessages([])
-      }
-    }
-  }
-
-  const startEditingTitle = (sessionId: string, currentTitle: string) => {
-    setEditingSessionId(sessionId)
-    setEditingTitle(currentTitle)
-  }
-
-  const saveTitle = () => {
-    if (!editingSessionId || !editingTitle.trim()) return
-    
-    setChatSessions(prev => prev.map(session => 
-      session.id === editingSessionId 
-        ? { ...session, title: editingTitle.trim() }
-        : session
-    ))
-    
-    setEditingSessionId(null)
-    setEditingTitle('')
-  }
-
   const retryFailedOperations = () => {
     setErrors([])
     toast.success('Retrying failed operations...')
@@ -235,42 +117,120 @@ export default function ChatGPTAgent() {
   const sendMessage = async () => {
     if (!inputMessage.trim() || isLoading) return
 
-    // Create new session if none exists
-    if (!currentSessionId) {
-      createNewChat()
-    }
-
     const userMessage = inputMessage.trim()
     setInputMessage('')
     setIsLoading(true)
     setErrors([]) // Clear previous errors
 
+    // Initialize streaming progress
+    setStreamingProgress({
+      isStreaming: true,
+      currentStep: 'Starting...',
+      progress: 0,
+      stepMessages: []
+    })
+
     try {
+      // Try streaming first
+      const eventSource = new EventSource('/api/agent', {
+        // Note: EventSource doesn't support POST, so we'll use fetch with streaming
+      })
+
+      // Use fetch with streaming instead
       const response = await fetch('/api/agent', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
+        },
         body: JSON.stringify({ message: userMessage })
       })
 
-      const data = await response.json()
-
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to process message')
+        throw new Error('Failed to start streaming')
       }
 
-      // Update messages with the new responses
-      if (data.history) {
-        setMessages(data.history)
-        updateCurrentSession(data.history)
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value)
+          const lines = chunk.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                
+                if (data.type === 'progress') {
+                  setStreamingProgress(prev => ({
+                    ...prev,
+                    currentStep: data.message,
+                    progress: data.progress,
+                    stepMessages: [...prev.stepMessages, data.message]
+                  }))
+                } else if (data.type === 'step_complete') {
+                  // Add the completed step to messages immediately
+                  setMessages(prev => [...prev, data.step])
+                } else if (data.type === 'complete') {
+                  // Update with final conversation history
+                  setMessages(data.history)
+                  
+                  setStreamingProgress({
+                    isStreaming: false,
+                    currentStep: 'Complete!',
+                    progress: 100,
+                    stepMessages: []
+                  })
+                } else if (data.type === 'error') {
+                  throw new Error(data.error)
+                }
+              } catch (parseError) {
+                console.warn('Failed to parse streaming data:', parseError)
+              }
+            }
+          }
+        }
       }
 
     } catch (error: any) {
-      const errorMessage = error.message || 'Failed to send message'
-      setErrors(prev => [...prev, errorMessage])
-      toast.error(errorMessage)
-      console.error(error)
+      console.error('Streaming failed, falling back to regular request:', error)
+      
+      // Fallback to regular request
+      try {
+        const response = await fetch('/api/agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: userMessage })
+        })
+
+        const data = await response.json()
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to process message')
+        }
+
+        // Update messages with the new responses
+        if (data.history) {
+          setMessages(data.history)
+        }
+
+      } catch (fallbackError: any) {
+        const errorMessage = fallbackError.message || 'Failed to send message'
+        setErrors(prev => [...prev, errorMessage])
+        toast.error(errorMessage)
+        console.error(fallbackError)
+      }
     } finally {
       setIsLoading(false)
+      setStreamingProgress(prev => ({
+        ...prev,
+        isStreaming: false
+      }))
     }
   }
 
@@ -284,9 +244,6 @@ export default function ChatGPTAgent() {
 
       if (response.ok) {
         setMessages([])
-        if (currentSessionId) {
-          updateCurrentSession([])
-        }
         toast.success('Conversation cleared')
       }
     } catch (error) {
@@ -523,7 +480,7 @@ export default function ChatGPTAgent() {
               <span className="text-sm font-semibold text-emerald-600 uppercase tracking-wide">Script</span>
               <div className="mt-2 p-4 bg-gray-50 rounded-xl border border-gray-100">
                 <ReactMarkdown className="prose prose-sm max-w-none text-gray-800">
-                  {script.script}
+                  {String(script.script || '')}
                 </ReactMarkdown>
               </div>
             </div>
@@ -636,7 +593,7 @@ export default function ChatGPTAgent() {
               : 'bg-white text-gray-900 border border-gray-100'
           }`}>
             <div className="prose prose-sm max-w-none">
-              <ReactMarkdown>{message.content}</ReactMarkdown>
+              <ReactMarkdown>{String(message.content || '')}</ReactMarkdown>
             </div>
           </div>
 
@@ -672,7 +629,6 @@ export default function ChatGPTAgent() {
   if (!isClient) {
     return (
       <div className="flex h-screen bg-gradient-to-br from-gray-50 via-white to-gray-50">
-        <div className="w-80 bg-gray-900"></div>
         <div className="flex-1 flex items-center justify-center">
           <div className="animate-spin">
             <Bot className="h-8 w-8 text-blue-500" />
@@ -684,100 +640,11 @@ export default function ChatGPTAgent() {
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-gray-50 via-white to-gray-50">
-      {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'w-80' : 'w-0'} transition-all duration-300 bg-gray-900 text-white flex flex-col overflow-hidden`}>
-        {/* Sidebar Header */}
-        <div className="p-4 border-b border-gray-700">
-          <button
-            onClick={createNewChat}
-            className="w-full bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white px-4 py-3 rounded-xl transition-all duration-200 flex items-center gap-3 font-medium shadow-lg"
-          >
-            <Plus className="h-5 w-5" />
-            New Chat
-          </button>
-        </div>
-
-        {/* Chat Sessions */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin">
-          {chatSessions.map((session) => (
-            <div
-              key={session.id}
-              className={`group relative p-3 rounded-xl cursor-pointer transition-all duration-200 ${
-                currentSessionId === session.id
-                  ? 'bg-gray-700 border border-gray-600'
-                  : 'hover:bg-gray-800'
-              }`}
-              onClick={() => switchToSession(session.id)}
-            >
-              {editingSessionId === session.id ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={editingTitle}
-                    onChange={(e) => setEditingTitle(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && saveTitle()}
-                    onBlur={saveTitle}
-                    className="flex-1 bg-gray-600 text-white px-2 py-1 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    autoFocus
-                  />
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      saveTitle()
-                    }}
-                    className="text-green-400 hover:text-green-300"
-                  >
-                    <Check className="h-4 w-4" />
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-medium text-sm truncate pr-2">
-                      {session.title}
-                    </h3>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          startEditingTitle(session.id, session.title)
-                        }}
-                        className="text-gray-400 hover:text-white p-1"
-                      >
-                        <Edit3 className="h-3 w-3" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          deleteSession(session.id)
-                        }}
-                        className="text-gray-400 hover:text-red-400 p-1"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1">
-                    {formatSessionTime(session.updatedAt)}
-                  </p>
-                </>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-6 bg-white/80 backdrop-blur-xl border-b border-gray-200/50 sticky top-0 z-10">
           <div className="flex items-center gap-4">
-            <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-all duration-200"
-            >
-              {sidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-            </button>
             <div className="bg-gradient-to-br from-blue-500 via-purple-500 to-purple-600 p-3 rounded-2xl shadow-lg">
               <Bot className="h-7 w-7 text-white" />
             </div>
@@ -917,12 +784,48 @@ export default function ChatGPTAgent() {
                 <Bot className="h-5 w-5" />
               </div>
               <div className="flex-1">
-                <div className="inline-block bg-white text-gray-900 px-4 py-3 rounded-2xl shadow-sm border border-gray-100">
-                  <div className="flex items-center gap-3">
-                    <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
-                    <span className="text-sm font-medium">Thinking...</span>
+                {streamingProgress.isStreaming ? (
+                  <div className="bg-white text-gray-900 px-4 py-3 rounded-2xl shadow-sm border border-gray-100 max-w-md">
+                    {/* Current Step */}
+                    <div className="flex items-center gap-3 mb-3">
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                      <span className="text-sm font-medium">{streamingProgress.currentStep}</span>
+                    </div>
+                    
+                    {/* Progress Bar */}
+                    <div className="mb-3">
+                      <div className="flex justify-between text-xs text-gray-500 mb-1">
+                        <span>Progress</span>
+                        <span>{streamingProgress.progress}%</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div 
+                          className="bg-gradient-to-r from-blue-500 to-purple-500 h-2 rounded-full transition-all duration-500 ease-out"
+                          style={{ width: `${streamingProgress.progress}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                    
+                    {/* Recent Steps */}
+                    {streamingProgress.stepMessages.length > 0 && (
+                      <div className="text-xs text-gray-400 space-y-1 max-h-20 overflow-y-auto">
+                        {streamingProgress.stepMessages.slice(-3).map((step, index) => (
+                          <div key={index} className="flex items-center gap-2">
+                            <div className="w-1 h-1 bg-gray-300 rounded-full"></div>
+                            <span>{step}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
+                ) : (
+                  <div className="inline-block bg-white text-gray-900 px-4 py-3 rounded-2xl shadow-sm border border-gray-100">
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                      <span className="text-sm font-medium">Thinking...</span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

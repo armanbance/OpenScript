@@ -94,6 +94,62 @@ export class OpenScriptAgent {
     }
   }
 
+  async processMessageWithProgress(userMessage: string, progressCallback: (step: any) => void): Promise<AgentMessage[]> {
+    // Add user message to history
+    const userMsg: AgentMessage = {
+      id: `user_${Date.now()}`,
+      role: 'user',
+      content: userMessage,
+      timestamp: new Date()
+    }
+    this.conversationHistory.push(userMsg)
+
+    // Send initial progress
+    progressCallback({
+      type: 'progress',
+      step: 'analyzing',
+      message: '🤔 Analyzing your request...',
+      progress: 10
+    })
+
+    // Check if this is a high-level video idea request
+    const isVideoIdeaRequest = await this.isVideoIdeaRequest(userMessage)
+    
+    if (isVideoIdeaRequest) {
+      // Execute the full video idea workflow with progress
+      return await this.executeVideoIdeaWorkflowWithProgress(userMessage, progressCallback)
+    } else {
+      // Use the existing single-tool workflow with progress
+      progressCallback({
+        type: 'progress',
+        step: 'tool_selection',
+        message: '🔧 Selecting the right tool...',
+        progress: 30
+      })
+
+      const toolDecision = await this.decideToolUse(userMessage)
+      
+      progressCallback({
+        type: 'progress',
+        step: 'executing',
+        message: `⚡ Executing ${toolDecision.tool}...`,
+        progress: 70
+      })
+
+      const responses = await this.executeToolAndRespond(toolDecision)
+      this.conversationHistory.push(...responses)
+      
+      progressCallback({
+        type: 'progress',
+        step: 'complete',
+        message: '✅ Done!',
+        progress: 100
+      })
+
+      return responses
+    }
+  }
+
   private async isVideoIdeaRequest(userMessage: string): Promise<boolean> {
     const videoIdeaKeywords = [
       'video idea', 'script', 'content', 'going to', 'trip', 'visiting',
@@ -196,6 +252,177 @@ export class OpenScriptAgent {
     return responses
   }
 
+  private async executeVideoIdeaWorkflowWithProgress(userMessage: string, progressCallback: (step: any) => void): Promise<AgentMessage[]> {
+    const responses: AgentMessage[] = []
+
+    // Step 1: Extract topic and context
+    progressCallback({
+      type: 'progress',
+      step: 'extracting_topic',
+      message: '🧠 Extracting topic and context...',
+      progress: 20
+    })
+
+    const topicData = await this.extractTopicAndContext(userMessage)
+    
+    // Add thinking message
+    const thinkingMsg: AgentMessage = {
+      id: `tool_${Date.now()}`,
+      role: 'tool',
+      content: `🧠 Analyzing your request: "${topicData.topic}"...`,
+      toolCall: { tool: 'create_video_idea', topic: topicData.topic, context: topicData.context, userIntent: topicData.intent },
+      timestamp: new Date()
+    }
+    responses.push(thinkingMsg)
+    
+    progressCallback({
+      type: 'step_complete',
+      step: thinkingMsg,
+      progress: 25
+    })
+
+    try {
+      // Step 2: Search for trending videos
+      progressCallback({
+        type: 'progress',
+        step: 'searching_videos',
+        message: `🔍 Searching for trending videos about "${topicData.topic}"...`,
+        progress: 35
+      })
+
+      const searchResult = await this.executeYouTubeSearch(topicData.topic, 'search')
+      
+      // Add search status
+      const searchMsg: AgentMessage = {
+        id: `tool_${Date.now() + 1}`,
+        role: 'tool',
+        content: `🔍 Found ${searchResult.videos?.length || 0} trending videos about "${topicData.topic}"...`,
+        timestamp: new Date()
+      }
+      responses.push(searchMsg)
+      
+      progressCallback({
+        type: 'step_complete',
+        step: searchMsg,
+        progress: 45
+      })
+
+      // Step 3: Transcribe top 3 videos
+      progressCallback({
+        type: 'progress',
+        step: 'transcribing',
+        message: '📝 Analyzing video content and extracting viral patterns...',
+        progress: 55
+      })
+
+      const transcribeMsg: AgentMessage = {
+        id: `tool_${Date.now() + 2}`,
+        role: 'tool',
+        content: `📝 Analyzing video content and extracting viral patterns...`,
+        timestamp: new Date()
+      }
+      responses.push(transcribeMsg)
+      
+      progressCallback({
+        type: 'step_complete',
+        step: transcribeMsg,
+        progress: 60
+      })
+
+      const topVideos = searchResult.videos?.slice(0, 3) || []
+      const transcripts = await Promise.all(
+        topVideos.map(async (video: any, index: number) => {
+          progressCallback({
+            type: 'progress',
+            step: 'transcribing_video',
+            message: `📹 Transcribing video ${index + 1}/${topVideos.length}...`,
+            progress: 60 + (index * 5)
+          })
+          
+          try {
+            const result = await this.executeTranscription(video.url)
+            return { video, transcript: result.transcript }
+          } catch (error) {
+            return { video, transcript: `Video about ${video.caption}` }
+          }
+        })
+      )
+
+      // Step 4: Generate personalized scripts
+      progressCallback({
+        type: 'progress',
+        step: 'generating_scripts',
+        message: `🎬 Creating personalized scripts for your ${topicData.topic} content...`,
+        progress: 80
+      })
+
+      const scriptsMsg: AgentMessage = {
+        id: `tool_${Date.now() + 3}`,
+        role: 'tool',
+        content: `🎬 Creating personalized scripts for your ${topicData.topic} content...`,
+        timestamp: new Date()
+      }
+      responses.push(scriptsMsg)
+      
+      progressCallback({
+        type: 'step_complete',
+        step: scriptsMsg,
+        progress: 85
+      })
+
+      const videoIdeas = await this.generateVideoIdeas(topicData, transcripts)
+
+      // Step 5: Format and return comprehensive response
+      progressCallback({
+        type: 'progress',
+        step: 'finalizing',
+        message: '✨ Finalizing your video ideas...',
+        progress: 95
+      })
+
+      const finalResponse = this.formatVideoIdeaResponse(videoIdeas, topicData)
+      
+      const finalMsg: AgentMessage = {
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: finalResponse,
+        toolResult: { 
+          videos: topVideos,
+          scripts: videoIdeas.scripts,
+          topic: topicData.topic 
+        },
+        timestamp: new Date()
+      }
+      responses.push(finalMsg)
+
+      progressCallback({
+        type: 'progress',
+        step: 'complete',
+        message: '🎉 Your video ideas are ready!',
+        progress: 100
+      })
+
+    } catch (error: any) {
+      const errorMsg: AgentMessage = {
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: `Sorry, I encountered an error while creating your video ideas: ${error.message}. Let me try a simpler approach - what specific type of content are you looking to create?`,
+        timestamp: new Date()
+      }
+      responses.push(errorMsg)
+      
+      progressCallback({
+        type: 'error',
+        step: 'error',
+        message: `❌ Error: ${error.message}`,
+        progress: 100
+      })
+    }
+
+    this.conversationHistory.push(...responses)
+    return responses
+  }
+
   private async extractTopicAndContext(userMessage: string): Promise<{topic: string, context: string, intent: string}> {
     const systemPrompt = `Extract the main topic, context, and intent from this user message for video content creation.
 
@@ -270,10 +497,23 @@ JSON:`
           duration: 30
         })
 
+        // Extract text from script result - handle both object and string responses
+        let scriptText = ''
+        if (typeof scriptResult.script === 'string') {
+          scriptText = scriptResult.script
+        } else if (scriptResult.script && scriptResult.script.sections) {
+          // Extract text from sections
+          scriptText = scriptResult.script.sections
+            .map((section: any) => `${section.content}`)
+            .join('\n\n')
+        } else {
+          scriptText = prompt.template
+        }
+
         scripts.push({
           title: `${prompt.type}: ${topicData.topic}`,
           hook: prompt.hook,
-          script: scriptResult.script || prompt.template,
+          script: scriptText,
           cta: this.generateCTA(prompt.type),
           reasoning: `This ${prompt.type.toLowerCase()} format works because it's highly shareable and creates FOMO`,
           hashtags: this.generateHashtags(topicData.topic, prompt.type)
@@ -330,7 +570,7 @@ JSON:`
     videoIdeas.scripts.forEach((script, index) => {
       response += `## 🎥 **${script.title}**\n\n`
       response += `**Hook:** "${script.hook}"\n\n`
-      response += `**Script:**\n${script.script}\n\n`
+      response += `**Script:**\n${String(script.script || 'Script content unavailable')}\n\n`
       response += `**CTA:** ${script.cta}\n\n`
       response += `**Why this works:** ${script.reasoning}\n\n`
       response += `**Hashtags:** ${script.hashtags.join(' ')}\n\n`

@@ -8,146 +8,124 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Input text is required' }, { status: 400 })
     }
 
-    // Simulate AI processing delay
-    await new Promise(resolve => setTimeout(resolve, 3000))
+    // Check for required API keys
+    if (!process.env.FRIENDLI_API_KEY) {
+      return NextResponse.json({ 
+        error: 'Friendli API key not configured. Please add FRIENDLI_API_KEY to your environment variables.' 
+      }, { status: 500 })
+    }
 
-    // Generate script based on input parameters
-    const script = generateViralScript(inputText, niche, tone, duration)
+    // Generate script using Friendli API
+    const script = await generateViralScriptWithFriendli(inputText, niche, tone, duration)
 
     return NextResponse.json({ script })
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error generating script:', error)
     return NextResponse.json(
-      { error: 'Failed to generate script' },
+      { error: error.message || 'Failed to generate script' },
       { status: 500 }
     )
   }
 }
 
-function generateViralScript(inputText: string, niche: string, tone: string, duration: number) {
-  const hooks = {
-    engaging: [
-      "Stop scrolling! This will blow your mind...",
-      "POV: You just discovered the secret that everyone's talking about",
-      "Wait until you see what happens next...",
-      "This changed everything for me, and it will for you too",
-      "You won't believe what I'm about to show you"
-    ],
-    educational: [
-      "Here's what nobody tells you about...",
-      "The science behind this will shock you",
-      "Let me break this down for you step by step",
-      "This is the method professionals don't want you to know",
-      "Everything you thought you knew about this is wrong"
-    ],
-    inspirational: [
-      "Your life is about to change forever",
-      "This is your sign to start believing in yourself",
-      "What if I told you that you're capable of more than you think?",
-      "The only thing standing between you and success is this",
-      "Today is the day you stop making excuses"
-    ],
-    humorous: [
-      "Me trying to adult vs. reality:",
-      "Nobody: ... Absolutely nobody: ... Me:",
-      "When life gives you lemons, I give you this chaos",
-      "Plot twist: I have no idea what I'm doing",
-      "This is either genius or complete madness"
-    ],
-    dramatic: [
-      "Everything changed in that moment...",
-      "I never thought this would happen to me",
-      "The truth they don't want you to know",
-      "This secret has been hidden for too long",
-      "What I'm about to reveal will shock you"
-    ]
+async function generateViralScriptWithFriendli(inputText: string, niche: string, tone: string, duration: number): Promise<string> {
+  const systemPrompt = `You are a viral content script writer. Create engaging, short-form video scripts that are optimized for social media platforms like TikTok, Instagram Reels, and YouTube Shorts.
+
+INPUT PARAMETERS:
+- Topic/Content: ${inputText}
+- Niche: ${niche}
+- Tone: ${tone}
+- Duration: ${duration} seconds
+
+REQUIREMENTS:
+1. Start with a powerful hook that grabs attention in the first 3 seconds
+2. Include a clear value proposition or interesting insight
+3. Structure the content for the specified duration
+4. Use the specified tone (${tone})
+5. End with a strong call-to-action
+6. Write in a conversational, engaging style
+7. Include specific actionable content
+
+FORMAT YOUR RESPONSE AS A SCRIPT:
+Hook (0-3s): [Opening line that stops scrolling]
+Main Content: [Core message/value]
+Call-to-Action: [What you want viewers to do]
+
+Keep it concise, punchy, and optimized for the ${duration}-second format. Focus on ${niche} content with a ${tone} tone.`
+
+  try {
+    const response = await fetch('https://api.friendli.ai/serverless/v1/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.FRIENDLI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'meta-llama-3.1-8b-instruct',
+        prompt: `${systemPrompt}\n\nGenerate a viral script based on the above requirements.\n\nScript:`,
+        max_tokens: 300,
+        temperature: 0.7,
+        top_p: 0.9,
+        stop: ['\n\nUser:', '\nUser:', '---']
+      })
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(`Friendli API error: ${error.message || response.statusText}`)
+    }
+
+    const data = await response.json()
+    const generatedScript = data.choices?.[0]?.text || ''
+
+    // Clean up the response
+    const cleanScript = generatedScript
+      .trim()
+      .replace(/^Script:\s*/i, '')
+      .replace(/\n\n+/g, '\n\n')
+
+    return cleanScript || generateFallbackScript(inputText, niche, tone, duration)
+
+  } catch (error) {
+    console.error('Friendli API error:', error)
+    // Return fallback script if API fails
+    return generateFallbackScript(inputText, niche, tone, duration)
   }
-
-  const ctas = [
-    "Follow for more viral content like this!",
-    "Save this for later - you'll thank me!",
-    "Share this with someone who needs to see it",
-    "Comment below if this helped you!",
-    "Double tap if you agree!",
-    "Tag a friend who needs this advice",
-    "Turn on notifications so you don't miss out"
-  ]
-
-  const selectedHooks = hooks[tone as keyof typeof hooks] || hooks.engaging
-  const hook = selectedHooks[Math.floor(Math.random() * selectedHooks.length)]
-  const cta = ctas[Math.floor(Math.random() * ctas.length)]
-
-  // Generate body content based on input
-  const bodyContent = generateBodyContent(inputText, niche, tone, duration)
-
-  const script = {
-    id: `script_${Date.now()}`,
-    title: `Viral ${niche || 'Content'} Script - ${tone} Tone`,
-    sections: [
-      {
-        type: 'hook' as const,
-        content: hook,
-        timestamp: '0-3s'
-      },
-      {
-        type: 'intro' as const,
-        content: `Welcome back! Today I'm sharing something incredible about ${niche || 'this topic'} that's been getting amazing results.`,
-        timestamp: '3-8s'
-      },
-      {
-        type: 'body' as const,
-        content: bodyContent,
-        timestamp: `8-${duration - 5}s`
-      },
-      {
-        type: 'cta' as const,
-        content: cta,
-        timestamp: `${duration - 5}-${duration}s`
-      }
-    ],
-    tone,
-    duration,
-    hooks: selectedHooks.slice(0, 3),
-    suggestions: [
-      "Use trending sounds to boost reach",
-      "Add captions for accessibility",
-      "Include relevant hashtags in your niche",
-      "Post during peak hours for your audience",
-      "Engage with comments quickly after posting"
-    ]
-  }
-
-  return script
 }
 
-function generateBodyContent(inputText: string, niche: string, tone: string, duration: number): string {
-  const templates = {
-    short: "Here's the key insight: [MAIN_POINT]. This works because [REASON]. The results speak for themselves - [BENEFIT].",
-    medium: "Let me break this down for you. First, [STEP_1]. Then, [STEP_2]. Finally, [STEP_3]. The reason this is so effective is [EXPLANATION]. You'll see results immediately.",
-    long: "Here's everything you need to know. The problem most people face is [PROBLEM]. But here's the solution: [SOLUTION]. Step one: [DETAIL_1]. Step two: [DETAIL_2]. Step three: [DETAIL_3]. The science behind this is fascinating - [SCIENCE]. That's why this method works so well."
+function generateFallbackScript(inputText: string, niche: string, tone: string, duration: number): string {
+  const hooks = [
+    "Stop scrolling! This will change everything...",
+    "You won't believe what I just discovered...",
+    "This secret has been hidden for too long...",
+    "POV: You're about to learn something incredible...",
+    "Wait until you see what happens next..."
+  ]
+
+  const ctas = [
+    "Follow for more tips like this!",
+    "Save this for later!",
+    "Share with someone who needs this!",
+    "Comment if this helped you!",
+    "Double tap if you agree!"
+  ]
+
+  const hook = hooks[Math.floor(Math.random() * hooks.length)]
+  const cta = ctas[Math.floor(Math.random() * ctas.length)]
+
+  let bodyContent = ''
+  if (duration <= 30) {
+    bodyContent = `Here's the key insight about ${inputText}: it's all about timing and authenticity. This approach works because it connects with your audience on a deeper level.`
+  } else if (duration <= 60) {
+    bodyContent = `Let me break down ${inputText} for you. First, understand your audience. Second, create valuable content. Third, be consistent. This method has helped thousands of creators grow their following.`
+  } else {
+    bodyContent = `Everything you need to know about ${inputText}. The biggest mistake people make is overthinking it. Here's the step-by-step process: start with research, create authentic content, engage with your community, and stay consistent. The results speak for themselves.`
   }
 
-  const template = duration <= 30 ? templates.short : duration <= 60 ? templates.medium : templates.long
+  return `Hook (0-3s): ${hook}
 
-  // Extract key points from input text
-  const words = inputText.toLowerCase().split(' ')
-  const keyWords = words.filter(word => word.length > 4).slice(0, 5)
-  
-  let content = template
-    .replace('[MAIN_POINT]', `the power of ${keyWords[0] || niche || 'this method'}`)
-    .replace('[REASON]', `it leverages ${keyWords[1] || 'proven principles'}`)
-    .replace('[BENEFIT]', `increased engagement and ${keyWords[2] || 'better results'}`)
-    .replace('[STEP_1]', `focus on ${keyWords[0] || 'the foundation'}`)
-    .replace('[STEP_2]', `implement ${keyWords[1] || 'the strategy'}`)
-    .replace('[STEP_3]', `optimize for ${keyWords[2] || 'maximum impact'}`)
-    .replace('[PROBLEM]', `struggling with ${niche || 'this challenge'}`)
-    .replace('[SOLUTION]', `using ${keyWords[0] || 'this approach'}`)
-    .replace('[DETAIL_1]', `understanding ${keyWords[1] || 'the basics'}`)
-    .replace('[DETAIL_2]', `applying ${keyWords[2] || 'the technique'}`)
-    .replace('[DETAIL_3]', `measuring ${keyWords[3] || 'the results'}`)
-    .replace('[EXPLANATION]', `it targets ${keyWords[0] || 'the core issue'}`)
-    .replace('[SCIENCE]', `research shows ${keyWords[1] || 'this method'} increases success rates`)
+Main Content: ${bodyContent}
 
-  return content
+Call-to-Action: ${cta}`
 } 

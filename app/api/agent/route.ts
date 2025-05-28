@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { OpenScriptAgent } from '../../../lib/agent'
+import { OpenScriptAgent } from '@/lib/agent'
 
 // Global agent instance to maintain conversation state
 let agentInstance: OpenScriptAgent | null = null
@@ -15,47 +15,77 @@ export async function POST(request: NextRequest) {
   try {
     const { message, action } = await request.json()
 
-    if (!message && action !== 'clear') {
+    if (action === 'clear') {
+      getAgent().clearHistory()
+      return NextResponse.json({ success: true })
+    }
+
+    if (!message) {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 })
     }
 
-    const agent = getAgent()
+    console.log('Processing agent message:', message)
 
-    // Handle special actions
-    if (action === 'clear') {
-      agent.clearHistory()
+    // Check if this is a streaming request
+    const acceptHeader = request.headers.get('accept')
+    const isStreamingRequest = acceptHeader?.includes('text/event-stream')
+
+    if (isStreamingRequest) {
+      // Return streaming response for real-time progress
+      const encoder = new TextEncoder()
+      
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            // Set up progress callback
+            const progressCallback = (step: any) => {
+              const data = `data: ${JSON.stringify(step)}\n\n`
+              controller.enqueue(encoder.encode(data))
+            }
+
+            // Process with progress updates
+            const responses = await getAgent().processMessageWithProgress(message, progressCallback)
+            
+            // Send final result
+            const finalData = `data: ${JSON.stringify({ 
+              type: 'complete', 
+              history: getAgent().getConversationHistory()
+            })}\n\n`
+            controller.enqueue(encoder.encode(finalData))
+            
+            controller.close()
+          } catch (error: any) {
+            const errorData = `data: ${JSON.stringify({ 
+              type: 'error', 
+              error: error.message 
+            })}\n\n`
+            controller.enqueue(encoder.encode(errorData))
+            controller.close()
+          }
+        }
+      })
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      })
+    } else {
+      // Regular response for backwards compatibility
+      const responses = await getAgent().processMessage(message)
       return NextResponse.json({ 
-        success: true, 
-        message: 'Conversation history cleared',
-        history: []
+        history: getAgent().getConversationHistory()
       })
     }
 
-    // Check for required API keys
-    if (!process.env.FRIENDLI_API_KEY) {
-      return NextResponse.json({ 
-        error: 'Friendli API key not configured. Please add FRIENDLI_API_KEY to your environment variables.' 
-      }, { status: 500 })
-    }
-
-    // Process the message with the agent
-    console.log(`Processing agent message: ${message}`)
-    const responses = await agent.processMessage(message)
-    
-    // Get full conversation history
-    const history = agent.getConversationHistory()
-
-    return NextResponse.json({ 
-      success: true,
-      responses,
-      history: history.slice(-10) // Return last 10 messages to avoid huge payloads
-    })
-
   } catch (error: any) {
-    console.error('Agent processing error:', error)
-    return NextResponse.json({ 
-      error: `Agent failed: ${error.message || 'Unknown error'}` 
-    }, { status: 500 })
+    console.error('Agent error:', error)
+    return NextResponse.json(
+      { error: error.message || 'Failed to process message' },
+      { status: 500 }
+    )
   }
 }
 
